@@ -1,0 +1,20 @@
+# Keep Docker build context small and deterministic.
+node_modules
+.next
+dist
+coverage
+.git
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+next-dev.*.log
+terraform/.terraform
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+grafana/data
+prometheus/data
+ansible/.retry
+README.md
+docs
