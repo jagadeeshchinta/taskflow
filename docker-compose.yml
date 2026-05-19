@@ -168,8 +168,8 @@ services:
     image: sonatype/nexus3:3.73.0
     container_name: taskflow-nexus
     ports:
-      - "8081:8081"
-      - "8082:8082"
+      - "8083:8081"
+      - "8084:8082"
     volumes:
       - nexus_data:/nexus-data
     restart: unless-stopped

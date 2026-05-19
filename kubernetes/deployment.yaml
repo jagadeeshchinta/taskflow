@@ -31,12 +31,13 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        runAsUser: 1001
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: frontend
-          image: nexus:8082/taskflow/frontend:latest
-          imagePullPolicy: IfNotPresent
+          image: 756041604767.dkr.ecr.us-east-1.amazonaws.com/taskflow/frontend:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3000
@@ -112,12 +113,13 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        runAsUser: 1001
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: backend
-          image: nexus:8082/taskflow/backend:latest
-          imagePullPolicy: IfNotPresent
+          image: 756041604767.dkr.ecr.us-east-1.amazonaws.com/taskflow/backend:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3001
