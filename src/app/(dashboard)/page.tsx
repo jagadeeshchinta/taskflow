@@ -169,7 +169,7 @@ export default function DashboardPage() {
                   Executive workspace
                 </div>
                 <h1 className="text-4xl font-bold leading-[1.02] text-[hsl(var(--text-primary))] md:text-6xl">
-                  Elegant control for every sprint decision.
+                  Jagadeesh control for every sprint decision.
                 </h1>
                 <p className="mt-6 max-w-2xl text-base leading-8 text-[hsl(var(--text-secondary))]">
                   A refined command surface for delivery confidence, team capacity, project momentum, and the next best action.
