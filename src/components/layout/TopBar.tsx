@@ -6,7 +6,7 @@ import { Bell, Command, Menu, Search, Sparkles, UserPlus, Zap } from "lucide-rea
 import { ThemeToggle } from "./ThemeToggle";
 import { GlassDropdown } from "@/components/ui/GlassDropdown";
 import { LogOut, User, Settings } from "lucide-react";
-import { useSidebar } from "@/app/(dashboard)/layout";
+import { useSidebar } from "@/components/layout/SidebarContext";
 import { openCommandPalette, REFRESH_NOTIFICATIONS_EVENT } from "@/lib/ui-events";
 import { toast } from "sonner";
 

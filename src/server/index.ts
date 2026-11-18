@@ -18,6 +18,7 @@ import { commentRoutes } from "./routes/comments.routes";
 import { notificationRoutes } from "./routes/notifications.routes";
 import { searchRoutes } from "./routes/search.routes";
 import { auditRoutes } from "./routes/audit.routes";
+import { attachmentRoutes } from "./routes/attachments.routes";
 import { errorMiddleware } from "./middleware/error.middleware";
 import { metricsHandler, metricsMiddleware } from "./middleware/metrics.middleware";
 
@@ -71,6 +72,7 @@ app.use("/api/v1/comments", commentRoutes);
 app.use("/api/v1/notifications", notificationRoutes);
 app.use("/api/v1/search", searchRoutes);
 app.use("/api/v1/audit", auditRoutes);
+app.use("/api/v1/attachments", attachmentRoutes);
 
 // ── Error Handler ─────────────────────────────────────────────
 app.use(errorMiddleware);

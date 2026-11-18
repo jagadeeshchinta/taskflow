@@ -10,10 +10,13 @@ dist/
 build/
 *.tsbuildinfo
 
-# Environment
+# Environment & Credentials
 .env
 .env.local
 .env.*.local
+*_accessKeys.csv
+*.key
+.aws/credentials
 
 # IDE
 .vscode/

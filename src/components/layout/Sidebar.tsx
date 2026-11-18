@@ -8,7 +8,7 @@ import {
   Settings, Zap, Plus,
 } from "lucide-react";
 import { GlassTooltip } from "@/components/ui/GlassTooltip";
-import { useSidebar } from "@/app/(dashboard)/layout";
+import { useSidebar } from "@/components/layout/SidebarContext";
 
 const navItems = [
   { href: "/", icon: LayoutDashboard, label: "Dashboard" },

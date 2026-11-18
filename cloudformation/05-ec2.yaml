@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Single EC2 Docker Host with Nginx Reverse Proxy (Port 80 only), Secrets Manager Dynamic Fetch, and CloudWatch Agent"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS EC2 resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Public Subnet ID where the EC2 instance will receive a public IP"
+
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: "Application Security Group ID from 01-networking.yaml (Inbound port 80/443 only)"
+
+  EC2InstanceProfileName:
+    Type: String
+    Description: "IAM Instance Profile Name to attach to the EC2 instance"
+
+  InstanceType:
+    Type: String
+    Default: "t3.small"
+    AllowedValues:
+      - "t3.micro"
+      - "t3.small"
+      - "t3a.small"
+      - "t4g.small"
+      - "t3.medium"
+    Description: "EC2 Instance Type (t3.small recommended for 2GB RAM to run Next.js 16 + Express + Redis comfortably)"
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+    Description: "SSM Parameter reference for the latest Ubuntu 22.04 LTS gp3 AMI"
+
+  RDSEndpoint:
+    Type: String
+    Description: "RDS PostgreSQL Endpoint Hostname"
+
+  RDSPort:
+    Type: String
+    Default: "5432"
+    Description: "RDS PostgreSQL Port"
+
+  DBName:
+    Type: String
+    Default: "taskflow"
+    Description: "PostgreSQL Database Name"
+
+  DBSecretArn:
+    Type: String
+    Description: "AWS Secrets Manager Secret ARN containing RDS username and password"
+
+  S3BucketName:
+    Type: String
+    Description: "S3 Bucket Name for TaskFlow attachments"
+
+Resources:
+  # ------ TaskFlow EC2 Instance ---------------------------------------------------------------------------------------------------------------------------------
+  TaskFlowInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
+      SubnetId: !Ref PublicSubnetId
+      IamInstanceProfile: !Ref EC2InstanceProfileName
+      SecurityGroupIds:
+        - !Ref AppSecurityGroupId
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+          echo "---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+          echo " Starting TaskFlow EC2 Docker Application Bootstrap"
+          echo "---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+
+          # 1. Configure 1GB swapfile on EBS for memory safety
+          if [ ! -f /swapfile ]; then
+            echo "[1/7] Creating 1GB swapfile..."
+            fallocate -l 1G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+
+          # 2. Update and install base utilities
+          echo "[2/7] Updating package cache..."
+          apt-get update -y
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            gnupg \
+            lsb-release \
+            unzip \
+            git \
+            jq
+
+          # 3. Install Docker Engine & Docker Compose Plugin
+          echo "[3/7] Installing Docker Engine..."
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          chmod a+r /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update -y
+          apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          systemctl start docker
+          systemctl enable docker
+          usermod -aG docker ubuntu
+
+          # 4. Install AWS CLI v2 and Amazon CloudWatch Agent
+          echo "[4/7] Installing AWS CLI & CloudWatch Agent..."
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install || true
+          rm -rf /tmp/aws /tmp/awscliv2.zip
+
+          curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb" -o "/tmp/amazon-cloudwatch-agent.deb"
+          dpkg -i /tmp/amazon-cloudwatch-agent.deb || true
+          rm -f /tmp/amazon-cloudwatch-agent.deb
+
+          # 5. Retrieve Database Credentials dynamically from AWS Secrets Manager (No plaintext params!)
+          echo "[5/7] Fetching DB credentials securely from AWS Secrets Manager..."
+          DB_SECRET_JSON=$(aws secretsmanager get-secret-value \
+            --region "${AWS::Region}" \
+            --secret-id "${DBSecretArn}" \
+            --query "SecretString" \
+            --output text)
+
+          DB_USER=$(echo "$DB_SECRET_JSON" | jq -r .username)
+          DB_PASS=$(echo "$DB_SECRET_JSON" | jq -r .password)
+          DB_USER_ENC=$(jq -rn --arg v "$DB_USER" '$v|@uri')
+          DB_PASS_ENC=$(jq -rn --arg v "$DB_PASS" '$v|@uri')
+
+          # Generate unique per-instance cryptographic app secrets at boot (never hardcoded in templates)
+          APP_AUTH_SECRET=$(openssl rand -hex 32)
+          APP_JWT_SECRET=$(openssl rand -hex 32)
+
+          # 6. Prepare TaskFlow Directory, Production Compose, and Nginx Reverse Proxy
+          echo "[6/7] Writing production configuration and Nginx reverse proxy..."
+          mkdir -p /opt/taskflow/nginx
+
+          # Nginx Reverse Proxy config: strictly routes port 80 to internal containers
+          cat << 'NGINX_EOF' > /opt/taskflow/nginx/default.conf
+          server {
+              listen 80;
+              server_name _;
+              client_max_body_size 15M;
+
+              location /api/ {
+                  proxy_pass http://backend:3001;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              location /socket.io/ {
+                  proxy_pass http://backend:3001;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "Upgrade";
+                  proxy_set_header Host $host;
+              }
+
+              location / {
+                  proxy_pass http://frontend:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          NGINX_EOF
+
+          # Production environment variables file
+          cat << EOF > /opt/taskflow/.env
+          NODE_ENV=production
+          PORT=3001
+          NEXT_PUBLIC_APP_URL=http://localhost:3000
+          NEXT_PUBLIC_API_URL=http://localhost:3000/api
+          NEXT_PUBLIC_WS_URL=ws://localhost:3001
+          API_URL=http://backend:3001
+          DATABASE_URL=postgresql://$${DB_USER_ENC}:$${DB_PASS_ENC}@${RDSEndpoint}:${RDSPort}/${DBName}?schema=public&sslmode=require
+          DIRECT_DATABASE_URL=postgresql://$${DB_USER_ENC}:$${DB_PASS_ENC}@${RDSEndpoint}:${RDSPort}/${DBName}?schema=public&sslmode=require
+          DB_SECRET_ARN=${DBSecretArn}
+          RDS_ENDPOINT=${RDSEndpoint}
+          RDS_PORT=${RDSPort}
+          DB_NAME=${DBName}
+          REDIS_URL=redis://redis:6379
+          AWS_REGION=${AWS::Region}
+          S3_ATTACHMENTS_BUCKET=${S3BucketName}
+          AUTH_SECRET=$${APP_AUTH_SECRET}
+          AUTH_TRUST_HOST=true
+          NEXTAUTH_SECRET=$${APP_AUTH_SECRET}
+          NEXTAUTH_URL=http://localhost:3000
+          JWT_SECRET=$${APP_JWT_SECRET}
+          METRICS_ENABLED=true
+          EOF
+          chmod 600 /opt/taskflow/.env
+
+          # Production Docker Compose specification with restart policies & health checks
+          cat << 'COMPOSE_EOF' > /opt/taskflow/docker-compose.yml
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              container_name: taskflow-proxy
+              restart: unless-stopped
+              ports:
+                - "80:80"
+              volumes:
+                - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+              depends_on:
+                - frontend
+                - backend
+
+            redis:
+              image: redis:7-alpine
+              container_name: taskflow-redis
+              restart: unless-stopped
+              command: ["redis-server", "--appendonly", "yes"]
+              healthcheck:
+                test: ["CMD", "redis-cli", "ping"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+
+            backend:
+              image: taskflow/backend:local
+              container_name: taskflow-backend
+              restart: unless-stopped
+              env_file: .env
+              depends_on:
+                redis:
+                  condition: service_healthy
+
+            frontend:
+              image: taskflow/frontend:local
+              container_name: taskflow-frontend
+              restart: unless-stopped
+              env_file: .env
+              depends_on:
+                - backend
+          COMPOSE_EOF
+
+          # 7. Configure CloudWatch Unified Agent
+          echo "[7/7] Starting CloudWatch Unified Agent..."
+          cat << 'CW_EOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "run_as_user": "root"
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/user-data.log",
+                      "log_group_name": "/taskflow/prod/ec2/system",
+                      "log_stream_name": "{instance_id}/user-data.log"
+                    },
+                    {
+                      "file_path": "/var/log/syslog",
+                      "log_group_name": "/taskflow/prod/ec2/system",
+                      "log_stream_name": "{instance_id}/syslog"
+                    }
+                  ]
+                }
+              }
+            },
+            "metrics": {
+              "namespace": "TaskFlow/EC2",
+              "metrics_collected": {
+                "mem": {
+                  "measurement": ["mem_used_percent"]
+                },
+                "disk": {
+                  "measurement": ["used_percent"],
+                  "resources": ["/"]
+                }
+              }
+            }
+          }
+          CW_EOF
+
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json || true
+
+          echo "TaskFlow EC2 initialization completed successfully!"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-host"
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  InstanceId:
+    Description: "TaskFlow EC2 Instance ID"
+    Value: !Ref TaskFlowInstance
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-InstanceId"
+
+  PublicIp:
+    Description: "TaskFlow EC2 Public IPv4 Address"
+    Value: !GetAtt TaskFlowInstance.PublicIp
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-PublicIp"
+
+  PrivateIp:
+    Description: "TaskFlow EC2 Private IPv4 Address"
+    Value: !GetAtt TaskFlowInstance.PrivateIp
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-PrivateIp"

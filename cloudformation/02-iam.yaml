@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Least-Privilege IAM Roles & Instance Profile with Scoped S3, Secrets Manager, CloudWatch, and SSM Policies"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS IAM resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  S3BucketName:
+    Type: String
+    Default: ""
+    Description: "Optional S3 bucket name. If omitted, policy is scoped to taskflow-attachments-* prefix."
+
+Conditions:
+  HasSpecificBucket: !Not [!Equals [!Ref S3BucketName, ""]]
+
+Resources:
+  # ------ EC2 Host IAM Role (Temporary STS Credentials via IMDSv2) ------------------------
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-ec2-role"
+      Description: "Least-privilege IAM role for TaskFlow EC2 instance (No permanent access keys)"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM allows secure terminal session via AWS console without exposing SSH port 22
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        # Enables unified CloudWatch Agent to send system & container metrics
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        # 1. Scoped S3 Policy: Explicit separation of Bucket-level vs Object-level permissions
+        - PolicyName: !Sub "${ProjectName}-${Environment}-s3-least-privilege"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3ObjectLevelOperations
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListBucketMultipartUploads
+                Resource:
+                  - !If
+                    - HasSpecificBucket
+                    - !Sub "arn:aws:s3:::${S3BucketName}/*"
+                    - !Sub "arn:aws:s3:::${ProjectName}-attachments-${AWS::AccountId}-${AWS::Region}/*"
+              - Sid: S3BucketLevelOperations
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !If
+                    - HasSpecificBucket
+                    - !Sub "arn:aws:s3:::${S3BucketName}"
+                    - !Sub "arn:aws:s3:::${ProjectName}-attachments-${AWS::AccountId}-${AWS::Region}"
+
+        # 2. Scoped AWS Secrets Manager Policy: Retrieve ONLY TaskFlow database credentials
+        - PolicyName: !Sub "${ProjectName}-${Environment}-secrets-manager-access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: GetTaskFlowSecretsOnly
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/${Environment}/*"
+
+        # 3. Scoped CloudWatch Logs Policy: Write strictly to /taskflow/* log groups
+        - PolicyName: !Sub "${ProjectName}-${Environment}-cloudwatch-logging"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogStreamAccess
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ProjectName}/${Environment}/*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ------ EC2 Instance Profile ------------------------------------------------------------------------------------------------------------------------------------
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectName}-${Environment}-ec2-profile"
+      Path: "/"
+      Roles:
+        - !Ref EC2InstanceRole
+
+Outputs:
+  RoleName:
+    Description: "TaskFlow EC2 IAM Role Name"
+    Value: !Ref EC2InstanceRole
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-EC2RoleName"
+
+  RoleArn:
+    Description: "TaskFlow EC2 IAM Role ARN"
+    Value: !GetAtt EC2InstanceRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-EC2RoleArn"
+
+  InstanceProfileName:
+    Description: "TaskFlow EC2 Instance Profile Name"
+    Value: !Ref EC2InstanceProfile
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-EC2InstanceProfileName"
+
+  InstanceProfileArn:
+    Description: "TaskFlow EC2 Instance Profile ARN"
+    Value: !GetAtt EC2InstanceProfile.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-EC2InstanceProfileArn"

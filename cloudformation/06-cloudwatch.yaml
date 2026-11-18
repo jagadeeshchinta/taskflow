@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Amazon CloudWatch Observability Suite: Log Groups, Alarms, Metrics Dashboard, and SNS Alerts"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS CloudWatch resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  EC2InstanceId:
+    Type: String
+    Description: "EC2 Instance ID to monitor with CloudWatch Alarms and Dashboard"
+
+  RDSInstanceIdentifier:
+    Type: String
+    Description: "RDS PostgreSQL Instance Identifier to monitor with CloudWatch Alarms and Dashboard"
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: "Optional administrator email address for CloudWatch alarm notifications"
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  # ------ SNS Topic for Operational Alerts ------------------------------------------------------------------------------------------------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-${Environment}-operational-alerts"
+      DisplayName: "TaskFlow Operational Alerts"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      Protocol: email
+      TopicArn: !Ref AlertsTopic
+      Endpoint: !Ref AlertEmail
+
+  # ------ CloudWatch Log Groups with 14-Day Cost-Effective Retention ------------------
+  SystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/${Environment}/ec2/system"
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/${Environment}/app/frontend"
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/${Environment}/app/backend"
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ------ CloudWatch Metric Alarms ------------------------------------------------------------------------------------------------------------------------
+  EC2HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-EC2-High-CPU"
+      AlarmDescription: "Alerts when TaskFlow EC2 instance CPU utilization exceeds 80% for 10 minutes"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2InstanceId
+
+  RDSHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-RDS-High-CPU"
+      AlarmDescription: "Alerts when TaskFlow RDS PostgreSQL CPU utilization exceeds 80% for 10 minutes"
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstanceIdentifier
+
+  RDSLowStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-RDS-Low-Storage"
+      AlarmDescription: "Alerts when TaskFlow RDS PostgreSQL free storage drops below 3 GB"
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3221225472 # 3 GiB in Bytes
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstanceIdentifier
+
+  # ------ CloudWatch Operational Single-Pane Dashboard ------------------------------------------------------------
+  TaskFlowDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ProjectName}-${Environment}-Operations"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 Host CPU Utilization (%)",
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", "InstanceId", "${EC2InstanceId}", { "label": "EC2 CPU" }]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS PostgreSQL CPU Utilization (%)",
+                "metrics": [
+                  ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${RDSInstanceIdentifier}", { "label": "RDS CPU" }]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS Database Active Connections",
+                "metrics": [
+                  ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${RDSInstanceIdentifier}", { "label": "Connections" }]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS Free Storage Space (MB)",
+                "metrics": [
+                  ["AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${RDSInstanceIdentifier}", { "stat": "Average", "label": "Free Storage (Bytes)" }]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DashboardName:
+    Description: "CloudWatch Operational Dashboard Name"
+    Value: !Ref TaskFlowDashboard
+
+  SNSTopicArn:
+    Description: "SNS Alerts Topic ARN"
+    Value: !Ref AlertsTopic
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-AlertsTopicArn"
+
+  SystemLogGroupName:
+    Description: "System Log Group Name"
+    Value: !Ref SystemLogGroup
+
+  FrontendLogGroupName:
+    Description: "Frontend Log Group Name"
+    Value: !Ref FrontendLogGroup
+
+  BackendLogGroupName:
+    Description: "Backend Log Group Name"
+    Value: !Ref BackendLogGroup

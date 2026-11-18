@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Master Nested CloudFormation Stack Orchestrator (Networking, IAM, S3, RDS, EC2, CloudWatch)"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  ExistingVpcId:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing VPC ID (leave blank to create a dedicated TaskFlow VPC)"
+
+  ExistingPublicSubnet1Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Public Subnet 1 ID (AZ a). Required if ExistingVpcId is set."
+
+  ExistingPublicSubnet2Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Public Subnet 2 ID (AZ b). Required if ExistingVpcId is set."
+
+  ExistingPrivateSubnet1Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Private Subnet 1 ID (AZ a) for RDS. Required if ExistingVpcId is set."
+
+  ExistingPrivateSubnet2Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Private Subnet 2 ID (AZ b) for RDS. Required if ExistingVpcId is set."
+
+  EC2InstanceType:
+    Type: String
+    Default: "t3.small"
+    AllowedValues:
+      - "t3.micro"
+      - "t3.small"
+      - "t3a.small"
+      - "t4g.small"
+      - "t3.medium"
+    Description: "EC2 Instance Type (t3.small recommended for 2GB RAM to run Next.js 16 + Express + Redis comfortably)"
+
+  DBInstanceClass:
+    Type: String
+    Default: "db.t3.micro"
+    AllowedValues:
+      - "db.t3.micro"
+      - "db.t4g.micro"
+      - "db.t3.small"
+      - "db.t4g.small"
+    Description: "RDS database instance class (db.t3.micro or db.t4g.micro for cost optimization / Free Tier)"
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+    Description: "Allocated storage size in GiB (20 GiB is AWS Free Tier eligible)"
+
+  DBName:
+    Type: String
+    Default: "taskflow"
+    Description: "Initial PostgreSQL database name"
+
+  DBMasterUsername:
+    Type: String
+    Default: "taskflowadmin"
+    Description: "Master username for PostgreSQL administrator (password auto-generated in Secrets Manager)"
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: "Optional administrator email address for CloudWatch alarm notifications"
+
+  AllowedCorsOrigin:
+    Type: String
+    Default: "https://taskflow.local"
+    AllowedPattern: "^https?://[a-zA-Z0-9.-]+(:[0-9]+)?$"
+    ConstraintDescription: "Must be a concrete http(s) origin without wildcards"
+    Description: "Strict allowed CORS origin for S3 presigned browser uploads"
+
+  TemplateBaseUrl:
+    Type: String
+    Default: "https://taskflow-templates-bucket.s3.ap-south-1.amazonaws.com"
+    Description: "S3 Base URL where child CloudFormation templates (01-06) are hosted for nested stack deployment"
+
+Resources:
+  # ── 1. Networking & Security Groups Nested Stack ────────────────────
+  NetworkingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${TemplateBaseUrl}/01-networking.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        ExistingVpcId: !Ref ExistingVpcId
+        ExistingPublicSubnet1Id: !Ref ExistingPublicSubnet1Id
+        ExistingPublicSubnet2Id: !Ref ExistingPublicSubnet2Id
+        ExistingPrivateSubnet1Id: !Ref ExistingPrivateSubnet1Id
+        ExistingPrivateSubnet2Id: !Ref ExistingPrivateSubnet2Id
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: Networking
+
+  # ── 2. IAM Least-Privilege Nested Stack ─────────────────────────────
+  IAMStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${TemplateBaseUrl}/02-iam.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: IAM
+
+  # ── 3. S3 Private Storage Nested Stack ──────────────────────────────
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${TemplateBaseUrl}/03-s3.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        AllowedCorsOrigin: !Ref AllowedCorsOrigin
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: S3
+
+  # ── 4. RDS PostgreSQL Nested Stack (Secrets Manager Integrated) ─────
+  RDSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - NetworkingStack
+    Properties:
+      TemplateURL: !Sub "${TemplateBaseUrl}/04-rds.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DBSecurityGroupId: !GetAtt NetworkingStack.Outputs.DBSecurityGroupId
+        DBSubnetIds: !Sub "${NetworkingStack.Outputs.PrivateSubnet1Id},${NetworkingStack.Outputs.PrivateSubnet2Id}"
+        DBInstanceClass: !Ref DBInstanceClass
+        DBAllocatedStorage: !Ref DBAllocatedStorage
+        DBName: !Ref DBName
+        DBMasterUsername: !Ref DBMasterUsername
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: RDS
+
+  # ── 5. EC2 Application Compute Host Nested Stack ────────────────────
+  EC2Stack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - NetworkingStack
+      - IAMStack
+      - S3Stack
+      - RDSStack
+    Properties:
+      TemplateURL: !Sub "${TemplateBaseUrl}/05-ec2.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        PublicSubnetId: !GetAtt NetworkingStack.Outputs.PublicSubnet1Id
+        AppSecurityGroupId: !GetAtt NetworkingStack.Outputs.AppSecurityGroupId
+        EC2InstanceProfileName: !GetAtt IAMStack.Outputs.InstanceProfileName
+        InstanceType: !Ref EC2InstanceType
+        RDSEndpoint: !GetAtt RDSStack.Outputs.RDSEndpoint
+        RDSPort: !GetAtt RDSStack.Outputs.RDSPort
+        DBName: !Ref DBName
+        DBSecretArn: !GetAtt RDSStack.Outputs.DBSecretArn
+        S3BucketName: !GetAtt S3Stack.Outputs.BucketName
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: EC2
+
+  # ── 6. CloudWatch Observability & Alarms Nested Stack ────────────────
+  CloudWatchStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - EC2Stack
+      - RDSStack
+    Properties:
+      TemplateURL: !Sub "${TemplateBaseUrl}/06-cloudwatch.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        EC2InstanceId: !GetAtt EC2Stack.Outputs.InstanceId
+        RDSInstanceIdentifier: !GetAtt RDSStack.Outputs.RDSInstanceIdentifier
+        AlertEmail: !Ref AlertEmail
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: CloudWatch
+
+Outputs:
+  ApplicationUrl:
+    Description: "TaskFlow Web Application URL (Served securely via Nginx reverse proxy on Port 80)"
+    Value: !Sub "http://${EC2Stack.Outputs.PublicIp}"
+
+  EC2PublicIp:
+    Description: "TaskFlow EC2 Instance Public IPv4"
+    Value: !GetAtt EC2Stack.Outputs.PublicIp
+
+  AttachmentsBucketName:
+    Description: "TaskFlow Private Attachments S3 Bucket"
+    Value: !GetAtt S3Stack.Outputs.BucketName
+
+  RDSEndpoint:
+    Description: "Amazon RDS PostgreSQL Endpoint Hostname"
+    Value: !GetAtt RDSStack.Outputs.RDSEndpoint
+
+  DBSecretArn:
+    Description: "AWS Secrets Manager Secret ARN for Database Password"
+    Value: !GetAtt RDSStack.Outputs.DBSecretArn
+
+  CloudWatchDashboard:
+    Description: "CloudWatch Operational Dashboard Name"
+    Value: !GetAtt CloudWatchStack.Outputs.DashboardName

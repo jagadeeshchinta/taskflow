@@ -25,7 +25,15 @@ export async function GET() {
         assignee: { select: { id: true, name: true, image: true } },
         project: { select: { id: true, name: true } },
         comments: { select: { id: true } },
-        attachments: { select: { id: true } },
+        attachments: {
+          select: {
+            id: true,
+            filename: true,
+            size: true,
+            mimeType: true,
+            createdAt: true,
+          },
+        },
       },
       orderBy: [{ status: "asc" }, { position: "asc" }, { createdAt: "desc" }],
     });
@@ -45,6 +53,13 @@ export async function GET() {
         createdAt: task.createdAt.toISOString(),
         commentCount: task.comments.length,
         attachmentCount: task.attachments.length,
+        attachments: task.attachments.map((a) => ({
+          id: a.id,
+          filename: a.filename,
+          size: a.size,
+          mimeType: a.mimeType,
+          createdAt: a.createdAt.toISOString(),
+        })),
       })),
     });
   } catch (error) {
@@ -80,7 +95,15 @@ export async function POST(req: Request) {
       include: {
         assignee: { select: { name: true, image: true } },
         comments: { select: { id: true } },
-        attachments: { select: { id: true } },
+        attachments: {
+          select: {
+            id: true,
+            filename: true,
+            size: true,
+            mimeType: true,
+            createdAt: true,
+          },
+        },
       },
     });
 
@@ -97,6 +120,13 @@ export async function POST(req: Request) {
         createdAt: task.createdAt.toISOString(),
         commentCount: task.comments.length,
         attachmentCount: task.attachments.length,
+        attachments: task.attachments.map((a) => ({
+          id: a.id,
+          filename: a.filename,
+          size: a.size,
+          mimeType: a.mimeType,
+          createdAt: a.createdAt.toISOString(),
+        })),
       },
     }, { status: 201 });
   } catch (error) {

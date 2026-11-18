@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Private S3 Bucket with SSE-S3 Encryption, Strict Public Access Blocking, Scoped CORS, TLS Enforcement, and Lifecycle Rules"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS S3 resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  AllowedCorsOrigin:
+    Type: String
+    Default: "https://taskflow.local"
+    AllowedPattern: "^https?://[a-zA-Z0-9.-]+(:[0-9]+)?$"
+    ConstraintDescription: "Must be a concrete http(s) origin without wildcards (e.g., https://app.example.com or http://1.2.3.4)"
+    Description: "Strict allowed CORS origin for frontend presigned direct browser uploads (wildcards prohibited)"
+
+Conditions:
+  IsDevEnvironment: !Equals [!Ref Environment, "dev"]
+
+Resources:
+  # ------ TaskFlow Attachments Private S3 Bucket ------------------------------------------------------------------------------
+  AttachmentsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-attachments-${AWS::AccountId}-${AWS::Region}"
+      # 1. Block all 4 public access vectors (Zero public exposure)
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # 2. Server-Side Encryption at Rest (SSE-S3 AES256)
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # 3. Object Versioning for recovery & audit integrity
+      VersioningConfiguration:
+        Status: Enabled
+      # 4. Strict CORS configuration: concrete origins only, PUT/GET/HEAD only, scoped headers
+      CorsConfiguration:
+        CorsRules:
+          - Id: AllowDirectPresignedUploads
+            AllowedOrigins: !If
+              - IsDevEnvironment
+              - - !Ref AllowedCorsOrigin
+                - "http://localhost:3000"
+              - - !Ref AllowedCorsOrigin
+            AllowedMethods:
+              - GET
+              - PUT
+              - HEAD
+            AllowedHeaders:
+              - Content-Type
+              - Content-Length
+              - x-amz-date
+              - x-amz-security-token
+              - x-amz-content-sha256
+              - Authorization
+            ExposedHeaders:
+              - ETag
+              - x-amz-server-side-encryption
+              - x-amz-request-id
+              - x-amz-id-2
+            MaxAge: 3600
+      # 5. Lifecycle configuration: cost control on old versions and cleanup of incomplete uploads
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionOldVersionsToIA
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 180
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DataClassification
+          Value: Confidential
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ------ Bucket Policy Enforcing TLS 1.2+ Only ---------------------------------------------------------------------------------
+  EnforceTlsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AttachmentsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnforceTlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${AttachmentsBucket}"
+              - !Sub "arn:aws:s3:::${AttachmentsBucket}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+Outputs:
+  BucketName:
+    Description: "TaskFlow Attachments S3 Bucket Name"
+    Value: !Ref AttachmentsBucket
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-AttachmentsBucketName"
+
+  BucketArn:
+    Description: "TaskFlow Attachments S3 Bucket ARN"
+    Value: !GetAtt AttachmentsBucket.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-AttachmentsBucketArn"
+
+  BucketDomainName:
+    Description: "TaskFlow Attachments S3 Regional Domain Name"
+    Value: !GetAtt AttachmentsBucket.RegionalDomainName
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-AttachmentsBucketDomainName"

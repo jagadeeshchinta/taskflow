@@ -11,6 +11,14 @@ export const KANBAN_COLUMNS = [
   { id: "DONE", title: "Done", color: "hsl(var(--success))" },
 ];
 
+export type TaskAttachment = {
+  id: string;
+  filename: string;
+  size: number;
+  mimeType: string;
+  createdAt: string;
+};
+
 export type KanbanTask = {
   id: string;
   title: string;
@@ -23,6 +31,7 @@ export type KanbanTask = {
   createdAt?: string;
   commentCount?: number;
   attachmentCount?: number;
+  attachments?: TaskAttachment[];
 };
 
 export type KanbanTasksByStatus = Record<string, KanbanTask[]>;

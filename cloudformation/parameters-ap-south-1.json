@@ -1,0 +1,62 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "taskflow"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "ExistingVpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ExistingPublicSubnet1Id",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ExistingPublicSubnet2Id",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ExistingPrivateSubnet1Id",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ExistingPrivateSubnet2Id",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "EC2InstanceType",
+    "ParameterValue": "t3.small"
+  },
+  {
+    "ParameterKey": "DBInstanceClass",
+    "ParameterValue": "db.t3.micro"
+  },
+  {
+    "ParameterKey": "DBAllocatedStorage",
+    "ParameterValue": "20"
+  },
+  {
+    "ParameterKey": "DBName",
+    "ParameterValue": "taskflow"
+  },
+  {
+    "ParameterKey": "DBMasterUsername",
+    "ParameterValue": "taskflowadmin"
+  },
+  {
+    "ParameterKey": "AlertEmail",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AllowedCorsOrigin",
+    "ParameterValue": "https://taskflow.local"
+  },
+  {
+    "ParameterKey": "TemplateBaseUrl",
+    "ParameterValue": "https://taskflow-cfn-templates-<AWS_ACCOUNT_ID>-ap-south-1.s3.ap-south-1.amazonaws.com"
+  }
+]

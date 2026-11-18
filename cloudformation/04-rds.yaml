@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Amazon RDS PostgreSQL 16 with AWS Secrets Manager Automated Password Generation, KMS Encryption, and Private Multi-AZ Subnet Group"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS RDS resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  DBSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: "Pre-provisioned RDS Security Group ID from 01-networking.yaml (inbound port 5432 strictly from App SG)"
+
+  DBSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: "List of at least 2 private Subnet IDs across different AZs for Multi-AZ DB subnet group"
+
+  DBInstanceClass:
+    Type: String
+    Default: "db.t3.micro"
+    AllowedValues:
+      - "db.t3.micro"
+      - "db.t4g.micro"
+      - "db.t3.small"
+      - "db.t4g.small"
+    Description: "RDS database instance class (db.t3.micro or db.t4g.micro for cost optimization / Free Tier)"
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+    Description: "Allocated storage size in GiB (20 GiB is AWS Free Tier eligible)"
+
+  DBName:
+    Type: String
+    Default: "taskflow"
+    Description: "Initial PostgreSQL database name"
+
+  DBMasterUsername:
+    Type: String
+    Default: "taskflowadmin"
+    Description: "Master username for PostgreSQL database administrator"
+
+  EnableDeletionProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "Set to false for easy student project teardown; true for production deletion protection"
+
+Resources:
+  # ------ Automated Cryptographic Secret Generation (Zero Plaintext Passwords) ------
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/${Environment}/rds-credentials"
+      Description: "TaskFlow RDS PostgreSQL master credentials managed by Secrets Manager"
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBMasterUsername}"}'
+        GenerateStringKey: "password"
+        PasswordLength: 24
+        ExcludeCharacters: "\"@/\\ '"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ------ RDS Subnet Group (Spans 2 Private AZs) ------------------------------------------------------------------------------
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${ProjectName}-${Environment}-db-subnet-group"
+      DBSubnetGroupDescription: "Private subnets for TaskFlow RDS PostgreSQL database"
+      SubnetIds: !Ref DBSubnetIds
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ------ RDS PostgreSQL 16 DB Instance ---------------------------------------------------------------------------------------------------------
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-postgres"
+      Engine: postgres
+      EngineVersion: "16.3"
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      # Zero public IP assignment: strictly unreachable from the internet
+      PubliclyAccessible: false
+      DBName: !Ref DBName
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroupId
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "21:00-22:00"
+      PreferredMaintenanceWindow: "Sun:23:00-Mon:00:00"
+      AutoMinorVersionUpgrade: true
+      MultiAZ: false # Cost control for demonstration; can be flipped for enterprise multi-AZ
+      DeletionProtection: !Ref EnableDeletionProtection
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ------ Attach Secrets Manager Secret to RDS Target (Prerequisite for Rotation) ------
+  # NOTE: Automatic AWS::SecretsManager::RotationSchedule is intentionally NOT enabled by default
+  # because rotating a private-subnet RDS instance requires a VPC-attached Rotation Lambda plus
+  # either a Secrets Manager VPC Interface Endpoint (~$7.20/mo) or NAT Gateway (~$32.40/mo).
+  # The application supports runtime reconnection via src/lib/prisma.ts + src/lib/db-secrets.ts
+  # once rotation is enabled in production.
+  DatabaseSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DatabaseSecret
+      TargetId: !Ref RDSInstance
+      TargetType: AWS::RDS::DBInstance
+
+Outputs:
+  RDSEndpoint:
+    Description: "RDS PostgreSQL Connection Endpoint Hostname"
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-RDSEndpoint"
+
+  RDSPort:
+    Description: "RDS PostgreSQL Port"
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-RDSPort"
+
+  RDSDatabaseName:
+    Description: "RDS PostgreSQL Database Name"
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-RDSDatabaseName"
+
+  RDSInstanceIdentifier:
+    Description: "RDS PostgreSQL DB Instance Identifier"
+    Value: !Ref RDSInstance
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-RDSInstanceIdentifier"
+
+  DBSecretArn:
+    Description: "AWS Secrets Manager Secret ARN for RDS Credentials"
+    Value: !Ref DatabaseSecret
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-DBSecretArn"

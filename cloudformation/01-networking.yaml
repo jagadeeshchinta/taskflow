@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TaskFlow Phase 1 - Dedicated Networking & Security Group Architecture with 2-AZ RDS Support and Strict Reverse-Proxy Security"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "taskflow"
+    Description: "Project naming prefix for AWS networking resources"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Deployment environment stage"
+
+  ExistingVpcId:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing VPC ID (e.g. from Terraform or Default VPC). Leave empty to create a dedicated TaskFlow VPC."
+
+  ExistingPublicSubnet1Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Public Subnet 1 ID (AZ a). Required if ExistingVpcId is set."
+
+  ExistingPublicSubnet2Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Public Subnet 2 ID (AZ b). Required if ExistingVpcId is set."
+
+  ExistingPrivateSubnet1Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Private Subnet 1 ID (AZ a) for RDS. Required if ExistingVpcId is set."
+
+  ExistingPrivateSubnet2Id:
+    Type: String
+    Default: ""
+    Description: "Optional: Existing Private Subnet 2 ID (AZ b) for RDS. Required if ExistingVpcId is set."
+
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: "CIDR block for the dedicated VPC if ExistingVpcId is not provided"
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: "CIDR block for Public Subnet 1 (AZ a)"
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: "CIDR block for Public Subnet 2 (AZ b)"
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: "10.0.10.0/24"
+    Description: "CIDR block for Private Subnet 1 (AZ a) for RDS"
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: "10.0.20.0/24"
+    Description: "CIDR block for Private Subnet 2 (AZ b) for RDS"
+
+  AllowedSshCidr:
+    Type: String
+    Default: ""
+    Description: "Optional CIDR block for SSH (port 22). Leave empty to keep port 22 completely closed (AWS SSM is preferred)."
+
+Conditions:
+  CreateVpc: !Equals [!Ref ExistingVpcId, ""]
+  HasSshAccess: !Not [!Equals [!Ref AllowedSshCidr, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  # 1. Dedicated VPC Infrastructure (Conditional: only created if no existing VPC)
+  # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Condition: CreateVpc
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-vpc"
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateVpc
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-igw"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ------ Public Subnets across 2 AZs ---------------------------------------------------------------------------------------------------------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet1Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-1"
+        - Key: Type
+          Value: Public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet2Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-2"
+        - Key: Type
+          Value: Public
+
+  # ------ Private Subnets across 2 AZs for RDS Multi-AZ Subnet Group ---------------
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-private-1"
+        - Key: Type
+          Value: Private-RDS
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-private-2"
+        - Key: Type
+          Value: Private-RDS
+
+  # ------ Route Tables ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-rt"
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVpc
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-private-rt"
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  # 2. Decoupled Security Groups Architecture (Zero Circular Dependency)
+  # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+  # ------ Application Host Security Group ---------------------------------------------------------------------------------------------------
+  # Exposes ONLY HTTP (80) and HTTPS (443) via Reverse Proxy.
+  # Ports 3000 and 3001 are strictly internal to the EC2 host.
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-${Environment}-app-sg"
+      GroupDescription: "Security Group for TaskFlow EC2 Docker application host"
+      VpcId: !If [CreateVpc, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - Description: "Public HTTP Web Traffic for Nginx Reverse Proxy"
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+        - Description: "Public HTTPS Encrypted Web Traffic"
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+        - !If
+          - HasSshAccess
+          - Description: "Optional Restricted SSH Access"
+            IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref AllowedSshCidr
+          - !Ref "AWS::NoValue"
+      SecurityGroupEgress:
+        - Description: "Allow outbound traffic for package updates, S3, RDS, and CloudWatch"
+          IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-sg"
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ------ RDS Database Security Group ---------------------------------------------------------------------------------------------------------------
+  # Inbound TCP 5432 is strictly authorized ONLY from AppSecurityGroup.
+  # Zero public IP assignment and zero internet exposure.
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-${Environment}-rds-sg"
+      GroupDescription: "Isolates PostgreSQL traffic strictly to TaskFlow EC2 App Security Group"
+      VpcId: !If [CreateVpc, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - Description: "Authorize PostgreSQL TCP 5432 strictly from TaskFlow App SG"
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-rds-sg"
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  VpcId:
+    Description: "Active VPC ID"
+    Value: !If [CreateVpc, !Ref VPC, !Ref ExistingVpcId]
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-VpcId"
+
+  PublicSubnet1Id:
+    Description: "Public Subnet 1 ID (AZ a)"
+    Value: !If [CreateVpc, !Ref PublicSubnet1, !Ref ExistingPublicSubnet1Id]
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-PublicSubnet1Id"
+
+  PublicSubnet2Id:
+    Description: "Public Subnet 2 ID (AZ b)"
+    Value: !If [CreateVpc, !Ref PublicSubnet2, !Ref ExistingPublicSubnet2Id]
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-PublicSubnet2Id"
+
+  PrivateSubnet1Id:
+    Description: "Private Subnet 1 ID (AZ a) for RDS"
+    Value: !If [CreateVpc, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1Id]
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-PrivateSubnet1Id"
+
+  PrivateSubnet2Id:
+    Description: "Private Subnet 2 ID (AZ b) for RDS"
+    Value: !If [CreateVpc, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2Id]
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-PrivateSubnet2Id"
+
+  AppSecurityGroupId:
+    Description: "Application Host Security Group ID (Port 80/443 only)"
+    Value: !GetAtt AppSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-AppSecurityGroupId"
+
+  DBSecurityGroupId:
+    Description: "RDS Database Security Group ID (Port 5432 from App SG only)"
+    Value: !GetAtt DBSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-DBSecurityGroupId"
