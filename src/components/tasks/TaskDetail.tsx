@@ -188,9 +188,9 @@ export function TaskDetail({ task, onClose, onAttachmentAdded }: TaskDetailProps
       setAttachments((prev) => [newAttachment, ...prev]);
       onAttachmentAdded?.(newAttachment);
       toast.success("Attachment uploaded and verified successfully!");
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("[Attachment Upload Error]:", error);
-      toast.error(error.message || "Failed to upload attachment");
+      toast.error(error instanceof Error ? error.message : "Failed to upload attachment");
     } finally {
       setIsUploading(false);
     }
@@ -216,9 +216,9 @@ export function TaskDetail({ task, onClose, onAttachmentAdded }: TaskDetailProps
       link.click();
       document.body.removeChild(link);
       toast.success(`Download started for ${attachment.filename}`);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("[Download Error]:", error);
-      toast.error(error.message || "Failed to download attachment");
+      toast.error(error instanceof Error ? error.message : "Failed to download attachment");
     } finally {
       setDownloadingId(null);
     }

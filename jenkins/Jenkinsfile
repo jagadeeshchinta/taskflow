@@ -14,7 +14,7 @@ pipeline {
     KUBE_NAMESPACE = 'taskflow'
     HELM_RELEASE = 'taskflow'
     HELM_CHART = './helm/taskflow'
-    NEXUS_REGISTRY = 'localhost:8082'
+    NEXUS_REGISTRY = 'host.docker.internal:8084'
     FRONTEND_IMAGE = "${NEXUS_REGISTRY}/taskflow/frontend"
     BACKEND_IMAGE = "${NEXUS_REGISTRY}/taskflow/backend"
     NODE_ENV = 'test'
